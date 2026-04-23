@@ -3,6 +3,7 @@ package ics23
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"testing"
 )
 
@@ -335,5 +336,357 @@ func TestExistenceProofEmptyValueVerifyRejectsWrongRoot(t *testing.T) {
 	bogusRoot := bytes.Repeat([]byte{0xff}, 32)
 	if err := proof.Verify(spec, bogusRoot, proof.Key, proof.Value); err == nil {
 		t.Fatal("expected Verify to reject empty-value proof with mismatched root, got nil")
+	}
+}
+
+// TestNonExistenceProofVerifyWithEmptyValueNeighbor exercises the exact
+// failure mode that motivated the patch: a non-membership proof whose neighbor
+// existence proof commits to an empty value. Verification must succeed when
+// the neighbor proof is valid and ordered correctly.
+func TestNonExistenceProofVerifyWithEmptyValueNeighbor(t *testing.T) {
+	op := &LeafOp{
+		Hash:         HashOp_SHA256,
+		PrehashValue: HashOp_SHA256,
+		Length:       LengthOp_VAR_PROTO,
+		Prefix:       []byte{0},
+	}
+	spec := &ProofSpec{
+		LeafSpec: op,
+		InnerSpec: &InnerSpec{
+			ChildOrder:      []int32{0, 1},
+			MinPrefixLength: 1,
+			MaxPrefixLength: 1,
+			ChildSize:       32,
+			Hash:            HashOp_SHA256,
+		},
+	}
+
+	// Use a right-neighbor-only proof so NonExistenceProof.Verify must validate
+	// the embedded empty-value existence proof and then check key ordering.
+	right := &ExistenceProof{
+		Key:   []byte("bank/denom/uatom/cosmos1abc"),
+		Value: []byte{},
+		Leaf:  op,
+	}
+	root, err := right.Calculate()
+	if err != nil {
+		t.Fatalf("Calculate failed: %v", err)
+	}
+
+	proof := &NonExistenceProof{
+		Key:   []byte("bank/denom/uatom/cosmos1aaa"),
+		Right: right,
+	}
+
+	if err := proof.Verify(spec, root, proof.Key); err != nil {
+		t.Fatalf("expected NonExistenceProof.Verify to accept valid empty-value right neighbor, got: %v", err)
+	}
+}
+
+// TestNonExistenceProofVerifyWithEmptyValueNeighborRejectsWrongRoot confirms
+// the patch does not weaken the root-matching requirement for non-membership
+// proofs that contain an empty-value neighbor.
+func TestNonExistenceProofVerifyWithEmptyValueNeighborRejectsWrongRoot(t *testing.T) {
+	op := &LeafOp{
+		Hash:         HashOp_SHA256,
+		PrehashValue: HashOp_SHA256,
+		Length:       LengthOp_VAR_PROTO,
+		Prefix:       []byte{0},
+	}
+	spec := &ProofSpec{
+		LeafSpec: op,
+		InnerSpec: &InnerSpec{
+			ChildOrder:      []int32{0, 1},
+			MinPrefixLength: 1,
+			MaxPrefixLength: 1,
+			ChildSize:       32,
+			Hash:            HashOp_SHA256,
+		},
+	}
+	proof := &NonExistenceProof{
+		Key: []byte("bank/denom/uatom/cosmos1aaa"),
+		Right: &ExistenceProof{
+			Key:   []byte("bank/denom/uatom/cosmos1abc"),
+			Value: []byte{},
+			Leaf:  op,
+		},
+	}
+
+	bogusRoot := bytes.Repeat([]byte{0xff}, 32)
+	if err := proof.Verify(spec, bogusRoot, proof.Key); err == nil {
+		t.Fatal("expected NonExistenceProof.Verify to reject empty-value neighbor with mismatched root, got nil")
+	}
+}
+
+// TestNonExistenceProofVerifyWithEmptyValueNeighborStillChecksOrdering proves
+// the patch only affects empty-value acceptance, not key-range validation.
+func TestNonExistenceProofVerifyWithEmptyValueNeighborStillChecksOrdering(t *testing.T) {
+	op := &LeafOp{
+		Hash:         HashOp_SHA256,
+		PrehashValue: HashOp_SHA256,
+		Length:       LengthOp_VAR_PROTO,
+		Prefix:       []byte{0},
+	}
+	spec := &ProofSpec{
+		LeafSpec: op,
+		InnerSpec: &InnerSpec{
+			ChildOrder:      []int32{0, 1},
+			MinPrefixLength: 1,
+			MaxPrefixLength: 1,
+			ChildSize:       32,
+			Hash:            HashOp_SHA256,
+		},
+	}
+	right := &ExistenceProof{
+		Key:   []byte("bank/denom/uatom/cosmos1abc"),
+		Value: []byte{},
+		Leaf:  op,
+	}
+	root, err := right.Calculate()
+	if err != nil {
+		t.Fatalf("Calculate failed: %v", err)
+	}
+
+	// This queried key is lexicographically to the right of the right neighbor,
+	// so the proof must fail with the usual ordering error.
+	proof := &NonExistenceProof{
+		Key:   []byte("bank/denom/uatom/cosmos1zzz"),
+		Right: right,
+	}
+
+	if err := proof.Verify(spec, root, proof.Key); err == nil {
+		t.Fatal("expected NonExistenceProof.Verify to reject misordered key, got nil")
+	}
+}
+
+// TestNonExistenceProofVerifyWithEmptyValueLeftNeighbor confirms the same
+// empty-value behavior works when the neighbor proof is on the left side.
+func TestNonExistenceProofVerifyWithEmptyValueLeftNeighbor(t *testing.T) {
+	op := &LeafOp{
+		Hash:         HashOp_SHA256,
+		PrehashValue: HashOp_SHA256,
+		Length:       LengthOp_VAR_PROTO,
+		Prefix:       []byte{0},
+	}
+	spec := &ProofSpec{
+		LeafSpec: op,
+		InnerSpec: &InnerSpec{
+			ChildOrder:      []int32{0, 1},
+			MinPrefixLength: 1,
+			MaxPrefixLength: 1,
+			ChildSize:       32,
+			Hash:            HashOp_SHA256,
+		},
+	}
+	left := &ExistenceProof{
+		Key:   []byte("bank/denom/uatom/cosmos1abc"),
+		Value: []byte{},
+		Leaf:  op,
+	}
+	root, err := left.Calculate()
+	if err != nil {
+		t.Fatalf("Calculate failed: %v", err)
+	}
+
+	proof := &NonExistenceProof{
+		Key:  []byte("bank/denom/uatom/cosmos1zzz"),
+		Left: left,
+	}
+
+	if err := proof.Verify(spec, root, proof.Key); err != nil {
+		t.Fatalf("expected NonExistenceProof.Verify to accept valid empty-value left neighbor, got: %v", err)
+	}
+}
+
+// TestNonExistenceProofEmptyValueNeighborSurvivesProtoRoundTrip verifies the
+// production transport path: after proto3 round-tripping, the embedded
+// empty-value existence proof carries a nil Value but non-membership
+// verification must still succeed end to end.
+func TestNonExistenceProofEmptyValueNeighborSurvivesProtoRoundTrip(t *testing.T) {
+	op := &LeafOp{
+		Hash:         HashOp_SHA256,
+		PrehashValue: HashOp_SHA256,
+		Length:       LengthOp_VAR_PROTO,
+		Prefix:       []byte{0},
+	}
+	spec := &ProofSpec{
+		LeafSpec: op,
+		InnerSpec: &InnerSpec{
+			ChildOrder:      []int32{0, 1},
+			MinPrefixLength: 1,
+			MaxPrefixLength: 1,
+			ChildSize:       32,
+			Hash:            HashOp_SHA256,
+		},
+	}
+	original := &NonExistenceProof{
+		Key: []byte("bank/denom/uatom/cosmos1aaa"),
+		Right: &ExistenceProof{
+			Key:   []byte("bank/denom/uatom/cosmos1abc"),
+			Value: []byte{},
+			Leaf:  op,
+		},
+	}
+	root, err := original.Right.Calculate()
+	if err != nil {
+		t.Fatalf("Calculate failed: %v", err)
+	}
+
+	wire, err := original.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var roundTripped NonExistenceProof
+	if err := roundTripped.Unmarshal(wire); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if roundTripped.Right == nil {
+		t.Fatal("expected right neighbor after round-trip, got nil")
+	}
+	if roundTripped.Right.Value != nil {
+		t.Fatalf("expected round-tripped empty neighbor value to deserialize as nil, got %v", roundTripped.Right.Value)
+	}
+
+	if err := roundTripped.Verify(spec, root, roundTripped.Key); err != nil {
+		t.Fatalf("expected proto-roundtripped NonExistenceProof.Verify to succeed, got: %v", err)
+	}
+}
+
+// TestCommitmentProofVerifyNonMembershipWithEmptyValueNeighbor exercises the
+// public wrapper API to ensure the patch remains effective after wrapping the
+// non-membership proof in a CommitmentProof.
+func TestCommitmentProofVerifyNonMembershipWithEmptyValueNeighbor(t *testing.T) {
+	op := &LeafOp{
+		Hash:         HashOp_SHA256,
+		PrehashValue: HashOp_SHA256,
+		Length:       LengthOp_VAR_PROTO,
+		Prefix:       []byte{0},
+	}
+	spec := &ProofSpec{
+		LeafSpec: op,
+		InnerSpec: &InnerSpec{
+			ChildOrder:      []int32{0, 1},
+			MinPrefixLength: 1,
+			MaxPrefixLength: 1,
+			ChildSize:       32,
+			Hash:            HashOp_SHA256,
+		},
+	}
+	nonexist := &NonExistenceProof{
+		Key: []byte("bank/denom/uatom/cosmos1aaa"),
+		Right: &ExistenceProof{
+			Key:   []byte("bank/denom/uatom/cosmos1abc"),
+			Value: []byte{},
+			Leaf:  op,
+		},
+	}
+	root, err := nonexist.Right.Calculate()
+	if err != nil {
+		t.Fatalf("Calculate failed: %v", err)
+	}
+
+	proof := &CommitmentProof{
+		Proof: &CommitmentProof_Nonexist{Nonexist: nonexist},
+	}
+
+	if !VerifyNonMembership(spec, root, proof, nonexist.Key) {
+		t.Fatal("expected VerifyNonMembership wrapper to accept valid empty-value neighbor proof")
+	}
+}
+
+// TestProofVectorsProtoRoundTripInvariant uses the repo's existing IAVL,
+// Tendermint, and SMT proof corpus to ensure this fork behaves identically on
+// ordinary shipped vectors after protobuf serialization and deserialization.
+// This is the closest local stand-in for a broader cross-spec regression
+// corpus: roots must remain stable and valid proofs must stay valid.
+func TestProofVectorsProtoRoundTripInvariant(t *testing.T) {
+	for _, tc := range VectorsTestData() {
+		tc := tc
+		name := fmt.Sprintf("%s/%s", tc.Dir, tc.Filename)
+		t.Run(name, func(t *testing.T) {
+			proof, ref := LoadFile(t, tc.Dir, tc.Filename)
+
+			originalRoot, err := proof.Calculate()
+			if err != nil {
+				t.Fatalf("original proof.Calculate failed: %v", err)
+			}
+			if !bytes.Equal(ref.RootHash, originalRoot) {
+				t.Fatalf("original calculated root: %X did not match expected root: %X", originalRoot, ref.RootHash)
+			}
+
+			wire, err := proof.Marshal()
+			if err != nil {
+				t.Fatalf("Marshal failed: %v", err)
+			}
+
+			var roundTripped CommitmentProof
+			if err := roundTripped.Unmarshal(wire); err != nil {
+				t.Fatalf("Unmarshal failed: %v", err)
+			}
+
+			roundTrippedRoot, err := roundTripped.Calculate()
+			if err != nil {
+				t.Fatalf("round-tripped proof.Calculate failed: %v", err)
+			}
+			if !bytes.Equal(originalRoot, roundTrippedRoot) {
+				t.Fatalf("round-tripped root changed:\n  original: %X\n  roundtrip: %X", originalRoot, roundTrippedRoot)
+			}
+
+			if ref.Value == nil {
+				if !VerifyNonMembership(tc.Spec, ref.RootHash, &roundTripped, ref.Key) {
+					t.Fatal("round-tripped non-membership proof became invalid")
+				}
+			} else {
+				if !VerifyMembership(tc.Spec, ref.RootHash, &roundTripped, ref.Key, ref.Value) {
+					t.Fatal("round-tripped membership proof became invalid")
+				}
+			}
+		})
+	}
+}
+
+// TestBatchProofVectorsProtoRoundTripInvariant performs the same invariance
+// check for the shipped batch-proof corpus, including cases intentionally
+// marked invalid. This increases confidence that the patch did not alter
+// non-empty proof handling or wrapper behavior across proof kinds and specs.
+func TestBatchProofVectorsProtoRoundTripInvariant(t *testing.T) {
+	for name, tc := range BatchVectorsTestData(t) {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			wire, err := tc.Proof.Marshal()
+			if err != nil {
+				t.Fatalf("Marshal failed: %v", err)
+			}
+
+			var roundTripped CommitmentProof
+			if err := roundTripped.Unmarshal(wire); err != nil {
+				t.Fatalf("Unmarshal failed: %v", err)
+			}
+
+			if tc.Ref.Value == nil {
+				valid := VerifyNonMembership(tc.Spec, tc.Ref.RootHash, &roundTripped, tc.Ref.Key)
+				if valid == tc.Invalid {
+					t.Fatalf("round-tripped non-membership validity changed: got %t want %t", valid, !tc.Invalid)
+				}
+
+				keys := [][]byte{tc.Ref.Key}
+				batchValid := BatchVerifyNonMembership(tc.Spec, tc.Ref.RootHash, &roundTripped, keys)
+				if batchValid == tc.Invalid {
+					t.Fatalf("round-tripped batch non-membership validity changed: got %t want %t", batchValid, !tc.Invalid)
+				}
+			} else {
+				valid := VerifyMembership(tc.Spec, tc.Ref.RootHash, &roundTripped, tc.Ref.Key, tc.Ref.Value)
+				if valid == tc.Invalid {
+					t.Fatalf("round-tripped membership validity changed: got %t want %t", valid, !tc.Invalid)
+				}
+
+				items := map[string][]byte{string(tc.Ref.Key): tc.Ref.Value}
+				batchValid := BatchVerifyMembership(tc.Spec, tc.Ref.RootHash, &roundTripped, items)
+				if batchValid == tc.Invalid {
+					t.Fatalf("round-tripped batch membership validity changed: got %t want %t", batchValid, !tc.Invalid)
+				}
+			}
+		})
 	}
 }
