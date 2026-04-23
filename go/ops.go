@@ -62,7 +62,12 @@ func (op *LeafOp) Apply(key []byte, value []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, errors.New("leaf op needs key")
 	}
-	if len(value) == 0 {
+	// Stride patch (upstream cosmos/ics23#134): permit empty-value leaves.
+	// SDK 0.50+ writes empty-value reverse-index entries (bank module's
+	// DenomAddressPrefix 0x03) via collections' WithReversePairUncheckedValue.
+	// ics23 upstream rejects these leaves even though IAVL produces valid proofs
+	// for them. Only a nil slice (truly absent value) should be rejected here.
+	if value == nil {
 		return nil, errors.New("leaf op needs value")
 	}
 	pkey, err := prepareLeafData(op.PrehashKey, op.Length, key)
