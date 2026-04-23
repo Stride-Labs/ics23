@@ -58,20 +58,36 @@ func TestLeafOpEmptyValueDeterministic(t *testing.T) {
 	}
 }
 
-// TestLeafOpNilValueStillRejected guards the narrow scope of the patch: truly
-// absent values (nil slice, typically from an uninitialized or unmarshalled
-// field) should continue to error. Only []byte{} — which the protobuf layer
-// normalizes nil into on deserialization (proofs.pb.go ~line 2540) — is now
-// accepted.
-func TestLeafOpNilValueStillRejected(t *testing.T) {
-	op := &LeafOp{Hash: HashOp_SHA256}
-
-	_, err := op.Apply([]byte("foo"), nil)
-	if err == nil {
-		t.Fatal("expected error on nil value, got nil")
+// TestLeafOpNilValueAccepted pins the behavior required to fix the real-world
+// bug: proto3 elides empty-bytes fields on the wire (see ExistenceProof's
+// MarshalToSizedBuffer, "if len(m.Value) > 0 { ... }"), so an empty-value leaf
+// arrives at the verifier as `nil`, not `[]byte{}`. Accepting nil is therefore
+// load-bearing — without it the patch is cosmetic and the original
+// non-membership failure still fires in production.
+func TestLeafOpNilValueAccepted(t *testing.T) {
+	op := &LeafOp{
+		Hash:         HashOp_SHA256,
+		PrehashValue: HashOp_SHA256,
+		Length:       LengthOp_VAR_PROTO,
+		Prefix:       []byte{0},
 	}
-	if err.Error() != "leaf op needs value" {
-		t.Fatalf("expected 'leaf op needs value', got: %v", err)
+
+	got, err := op.Apply([]byte("uatom"), nil)
+	if err != nil {
+		t.Fatalf("expected success on nil value, got error: %v", err)
+	}
+	if len(got) != 32 {
+		t.Fatalf("expected 32-byte SHA256 output, got %d bytes", len(got))
+	}
+
+	// nil and []byte{} should produce identical hashes; they're semantically
+	// equivalent at the hashing layer.
+	fromEmpty, err := op.Apply([]byte("uatom"), []byte{})
+	if err != nil {
+		t.Fatalf("unexpected error on []byte{}: %v", err)
+	}
+	if !bytes.Equal(got, fromEmpty) {
+		t.Fatalf("nil and []byte{} produced different hashes:\n  nil:   %x\n  empty: %x", got, fromEmpty)
 	}
 }
 
@@ -230,6 +246,61 @@ func TestExistenceProofEmptyValueVerifyAcceptsCorrectRoot(t *testing.T) {
 
 	if err := proof.Verify(spec, root, key, value); err != nil {
 		t.Fatalf("expected Verify to accept empty-value proof against its own root, got: %v", err)
+	}
+}
+
+// TestExistenceProofEmptyValueSurvivesProtoRoundTrip is the regression test
+// for the real-world bug. An ExistenceProof constructed with Value=[]byte{}
+// serializes to a wire form that OMITS the Value field entirely (proto3
+// elides empty bytes fields — see ExistenceProof.MarshalToSizedBuffer), so
+// on the verifier side the value arrives as nil. The patch must accept this
+// round-trip or the production non-membership failures continue to fire.
+func TestExistenceProofEmptyValueSurvivesProtoRoundTrip(t *testing.T) {
+	op := &LeafOp{
+		Hash:         HashOp_SHA256,
+		PrehashValue: HashOp_SHA256,
+		Length:       LengthOp_VAR_PROTO,
+		Prefix:       []byte{0},
+	}
+	original := &ExistenceProof{
+		Key:   []byte("bank/denom/uatom/cosmos1abc"),
+		Value: []byte{},
+		Leaf:  op,
+	}
+
+	wire, err := original.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var roundTripped ExistenceProof
+	if err := roundTripped.Unmarshal(wire); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	// Confirm our reading of proto3 semantics: after serialize+deserialize the
+	// empty Value has become nil. If this ever changes upstream, this assertion
+	// flips from documenting the bug to flagging the regression.
+	if roundTripped.Value != nil {
+		t.Fatalf("expected Value to deserialize as nil (proto3 omits empty bytes), got %v", roundTripped.Value)
+	}
+
+	// The load-bearing property: Calculate must succeed on the round-tripped
+	// proof. Under stock ics23 (or our original patch that only accepted
+	// []byte{}) this errors with "leaf op needs value".
+	root, err := roundTripped.Calculate()
+	if err != nil {
+		t.Fatalf("Calculate failed on proto-roundtripped empty-value proof: %v", err)
+	}
+
+	// And the root must match what the original produces — the patch doesn't
+	// change the hash, only whether the hash is allowed to be computed.
+	expected, err := original.Calculate()
+	if err != nil {
+		t.Fatalf("original Calculate failed: %v", err)
+	}
+	if !bytes.Equal(root, expected) {
+		t.Fatalf("round-tripped root differs from original:\n  original:  %x\n  roundtrip: %x", expected, root)
 	}
 }
 

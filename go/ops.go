@@ -65,11 +65,11 @@ func (op *LeafOp) Apply(key []byte, value []byte) ([]byte, error) {
 	// Stride patch (upstream cosmos/ics23#134): permit empty-value leaves.
 	// SDK 0.50+ writes empty-value reverse-index entries (bank module's
 	// DenomAddressPrefix 0x03) via collections' WithReversePairUncheckedValue.
-	// ics23 upstream rejects these leaves even though IAVL produces valid proofs
-	// for them. Only a nil slice (truly absent value) should be rejected here.
-	if value == nil {
-		return nil, errors.New("leaf op needs value")
-	}
+	// These serialize over the proto3 wire format with the Value field omitted
+	// entirely (proto3 elides empty bytes fields — see ExistenceProof's
+	// MarshalToSizedBuffer: `if len(m.Value) > 0`), so after deserialization on
+	// the verifier the value arrives as nil, not []byte{}. Both must be accepted;
+	// root-hash comparison continues to enforce proof integrity regardless.
 	pkey, err := prepareLeafData(op.PrehashKey, op.Length, key)
 	if err != nil {
 		return nil, fmt.Errorf("prehash key, %w", err)
